@@ -1,0 +1,13 @@
+pyspark
+pandas
+numpy
+matplotlib
+seaborn
+plotly
+wordcloud
+tweepy
+textblob
+nltk
+scikit-learn
+python-dotenv
+pytest
