@@ -63,8 +63,7 @@ class TwitterDataIngestion:
             col("id").alias("tweet_id"),
             col("text").alias("tweet_text"),
             col("created_at").alias("created_at"),
-            when(col("user.screen_name").isNotNull(), col("user.screen_name"))
-                .otherwise(col("user")).alias("username"),
+            col("user.screen_name").alias("username"),
             when(col("user.followers_count").isNotNull(), col("user.followers_count"))
                 .otherwise(lit(0)).alias("followers_count"),
             when(col("retweet_count").isNotNull(), col("retweet_count"))

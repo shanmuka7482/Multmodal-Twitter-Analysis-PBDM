@@ -75,6 +75,10 @@ def create_spark_session(mode: str = "local", partitions: int = 4):
     # Additional Windows/Java 21+ compatibility settings
     builder = builder.config("spark.sql.adaptive.enabled", "true")
     builder = builder.config("spark.sql.adaptive.coalescePartitions.enabled", "true")
+    # Help diagnose UDF crashes and avoid reused worker instability on Windows
+    builder = builder.config("spark.sql.execution.pyspark.udf.faulthandler.enabled", "true")
+    builder = builder.config("spark.python.worker.faulthandler.enabled", "true")
+    builder = builder.config("spark.python.worker.reuse", "false")
     
     spark = builder.getOrCreate()
     spark.sparkContext.setLogLevel("WARN")
@@ -171,8 +175,7 @@ def main():
         # Display sentiment distribution
         sentiment_dist = df.groupBy("sentiment_label").count().orderBy("sentiment_label")
         print("\nSentiment Distribution:")
-        for row in sentiment_dist.collect():
-            print(f"  {row['sentiment_label']}: {row['count']:,}")
+        sentiment_dist.show(truncate=False)
         
         # Factuality detection
         print("\n[4/5] Performing factuality detection...")
@@ -183,8 +186,7 @@ def main():
         # Display factuality distribution
         factuality_dist = df.groupBy("reliability_label").count().orderBy("reliability_label")
         print("\nFactuality Distribution:")
-        for row in factuality_dist.collect():
-            print(f"  {row['reliability_label']}: {row['count']:,}")
+        factuality_dist.show(truncate=False)
         
         # Visualization and reporting
         if not args.skip_visualization:
@@ -206,7 +208,7 @@ def main():
             visualizer.generate_summary_report(df)
             
             # Save results to CSV
-            visualizer.save_results_csv(df)
+            # visualizer.save_results_csv(df)
             
             print("✓ All visualizations and reports generated")
         

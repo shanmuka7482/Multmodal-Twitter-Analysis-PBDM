@@ -184,59 +184,71 @@ class FactualityDetector:
         Returns:
             DataFrame with factuality columns added
         """
-        from pyspark.sql.functions import pandas_udf
-        from pyspark.sql.types import StructType as SparkStructType, StructField
-        
-        factuality_schema = SparkStructType([
-            StructField("factuality_score", DoubleType(), True),
-            StructField("reliability_label", StringType(), True),
-            StructField("keyword_score", DoubleType(), True),
-            StructField("credibility_score", DoubleType(), True),
-            StructField("engagement_score", DoubleType(), True)
-        ])
-        
-        @pandas_udf(factuality_schema)
-        def detect_factuality_batch(batch: pd.DataFrame) -> pd.DataFrame:
-            results = []
-            for _, row in batch.iterrows():
-                score, label, kw_score, cred_score, eng_score = self._calculate_factuality_score(
-                    str(row.get('tweet_text', '')),
-                    int(row.get('followers_count', 0)),
-                    int(row.get('retweet_count', 0)),
-                    int(row.get('favorite_count', 0)),
-                    int(row.get('reply_count', 0))
-                )
-                results.append({
-                    "factuality_score": score,
-                    "reliability_label": label,
-                    "keyword_score": kw_score,
-                    "credibility_score": cred_score,
-                    "engagement_score": eng_score
-                })
-            return pd.DataFrame(results)
-        
-        # Apply factuality detection
-        factuality_df = df.withColumn(
-            "factuality",
-            detect_factuality_batch(
-                F.struct(
-                    col("tweet_text"),
-                    col("followers_count"),
-                    col("retweet_count"),
-                    col("favorite_count"),
-                    col("reply_count")
-                )
-            )
+        # Spark-native computation (no Python UDFs)
+        from pyspark.sql.functions import size, split, greatest, least, log10
+
+        # Guards
+        safe_word_count = F.when(col("tweet_text").isNull() | (col("tweet_text") == ""), lit(1)).otherwise(size(split(col("tweet_text"), " ")))
+        followers = F.coalesce(col("followers_count"), lit(0))
+        retweets = F.coalesce(col("retweet_count"), lit(0))
+        favorites = F.coalesce(col("favorite_count"), lit(0))
+        replies = F.coalesce(col("reply_count"), lit(0))
+        total_engagement = (retweets + favorites + replies)
+
+        # Keyword score via regex hits
+        text_l = lower(col("tweet_text"))
+        pos_hits = (
+            text_l.rlike(r".*\\bverified\\b.*").cast("int") +
+            text_l.rlike(r".*fact[- ]check.*").cast("int") +
+            text_l.rlike(r".*\\bfactual\\b.*").cast("int") +
+            text_l.rlike(r".*reliable source.*").cast("int") +
+            text_l.rlike(r".*\\bconfirmed\\b.*").cast("int") +
+            text_l.rlike(r".*\\bofficial\\b.*").cast("int") +
+            text_l.rlike(r".*\\bauthentic\\b.*").cast("int") +
+            text_l.rlike(r".*\\bcredible\\b.*").cast("int")
         )
-        
-        # Extract individual columns
-        result_df = factuality_df.select(
-            "*",
-            col("factuality.factuality_score").alias("factuality_score"),
-            col("factuality.reliability_label").alias("reliability_label"),
-            col("factuality.keyword_score").alias("keyword_score"),
-            col("factuality.credibility_score").alias("credibility_score"),
-            col("factuality.engagement_score").alias("engagement_score")
-        ).drop("factuality")
-        
+        neg_hits = (
+            text_l.rlike(r".*fake news.*").cast("int") +
+            text_l.rlike(r".*\\bmisinformation\\b.*").cast("int") +
+            text_l.rlike(r".*\\bdisinformation\\b.*").cast("int") +
+            text_l.rlike(r".*\\bunverified\\b.*").cast("int") +
+            text_l.rlike(r".*\\bunconfirmed\\b.*").cast("int") +
+            text_l.rlike(r".*\\brumor\\b.*").cast("int") +
+            text_l.rlike(r".*\\balleged\\b.*").cast("int") +
+            text_l.rlike(r".*\\bunsubstantiated\\b.*").cast("int") +
+            text_l.rlike(r".*\\bhoax\\b.*").cast("int")
+        )
+        raw_kw = (pos_hits - neg_hits) / F.greatest(safe_word_count.cast("double"), lit(1.0))
+        keyword_score = least(greatest((raw_kw + lit(1.0)) / lit(2.0), lit(0.0)), lit(1.0))
+
+        # Credibility score
+        follower_score = least(log10(followers + lit(1.0)) / lit(7.0), lit(1.0))
+        engagement_ratio = least((total_engagement / greatest(followers.cast("double"), lit(1.0))), lit(0.1))
+        engagement_score_c = least(engagement_ratio * lit(10.0), lit(1.0))
+        credibility_score = least(greatest((follower_score * lit(0.6)) + (engagement_score_c * lit(0.4)), lit(0.0)), lit(1.0))
+
+        # Engagement quality
+        favorite_reply_ratio = favorites.cast("double") / greatest(replies.cast("double"), lit(1.0))
+        normalized_ratio = least(favorite_reply_ratio / lit(10.0), lit(1.0))
+        volume_factor = least(log10(total_engagement + lit(1.0)) / lit(5.0), lit(1.0))
+        engagement_score = (normalized_ratio * lit(0.5)) + (volume_factor * lit(0.5))
+
+        # Final factuality
+        factuality_score = (keyword_score * lit(0.4)) + (credibility_score * lit(0.3)) + (engagement_score * lit(0.3))
+
+        high_thr = FACTUALITY_THRESHOLDS["high_reliability"]
+        med_thr = FACTUALITY_THRESHOLDS["medium_reliability"]
+
+        reliability_label = (
+            when(factuality_score >= lit(high_thr), lit("high"))
+            .when(factuality_score >= lit(med_thr), lit("medium"))
+            .otherwise(lit("low"))
+        )
+
+        result_df = df.withColumn("keyword_score", keyword_score.cast("double")) \
+            .withColumn("credibility_score", credibility_score.cast("double")) \
+            .withColumn("engagement_score", engagement_score.cast("double")) \
+            .withColumn("factuality_score", factuality_score.cast("double")) \
+            .withColumn("reliability_label", reliability_label)
+
         return result_df

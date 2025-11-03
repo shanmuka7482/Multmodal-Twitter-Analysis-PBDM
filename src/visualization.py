@@ -248,8 +248,9 @@ class Visualizer:
         if sentiment:
             df = df.filter(col("sentiment_label") == sentiment)
         
+        print(df.printSchema())
         # Collect text
-        texts = df.select("tweet_text").rdd.flatMap(lambda x: x).collect()
+        texts = df.select("tweet_text").toPandas()["tweet_text"].dropna().tolist()
         combined_text = " ".join(texts)
         
         if not combined_text.strip():
@@ -411,6 +412,7 @@ class Visualizer:
             df: Spark DataFrame with all results
             save_path: Path to save CSV
         """
+        print("Writing results to:", save_path)
         if save_path is None:
             save_path = self.output_dir / "analysis_results.csv"
         else:
@@ -421,6 +423,7 @@ class Visualizer:
         if count > 100000:
             print(f"Dataset has {count} rows. Sampling 100,000 rows for CSV export.")
             df = df.sample(False, 100000 / count).limit(100000)
+
         
         df.coalesce(1).write.mode("overwrite").option("header", "true").csv(str(save_path.parent / "csv_temp"))
         
